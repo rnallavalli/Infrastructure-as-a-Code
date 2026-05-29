@@ -1,0 +1,68 @@
+// Jenkinsfile - Multi-Region Active-Passive Terraform Deployment
+pipeline {
+    agent { label 'terraform' }
+    options { timeout(time: 2, unit: 'HOURS'); disableConcurrentBuilds(); timestamps() }
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['dev','staging','production'])
+        choice(name: 'ACTION', choices: ['plan','apply','destroy'])
+        string(name: 'IMAGE_TAG', defaultValue: 'latest')
+        booleanParam(name: 'AUTO_APPROVE', defaultValue: false)
+    }
+    environment {
+        AWS_DEFAULT_REGION = 'us-east-1'
+        TF_IN_AUTOMATION   = 'true'
+        APP_NAME           = 'myapp'
+        TF_DIR             = 'terraform'
+    }
+    stages {
+        stage('Checkout')      { steps { checkout scm } }
+        stage('Init')          { steps { dir(TF_DIR) { sh "terraform init -upgrade" } } }
+        stage('Validate')      { steps { dir(TF_DIR) { sh 'terraform validate && terraform fmt -check -recursive' } } }
+        stage('Security Scan') { steps { dir(TF_DIR) { sh 'tfsec . || true; checkov -d . || true' } } }
+        stage('Plan')          { steps { dir(TF_DIR) { sh "terraform plan -var-file=environments/${params.ENVIRONMENT}.tfvars -out=tfplan" } } }
+        stage('Approval') {
+            when { allOf { expression { params.ACTION != 'plan' }; expression { !params.AUTO_APPROVE }; expression { params.ENVIRONMENT != 'dev' } } }
+            steps { input(message: "Deploy to ${params.ENVIRONMENT}?", ok: 'Approve', submitter: 'platform-leads') }
+        }
+        stage('Apply') {
+            when { expression { params.ACTION == 'apply' } }
+            steps { dir(TF_DIR) { sh 'terraform apply -auto-approve tfplan' } }
+        }
+        stage('Deploy ECS Primary') {
+            when { expression { params.ACTION == 'apply' } }
+            steps { script {
+                def c = sh(script: "cd ${TF_DIR} && terraform output -raw primary_ecs_cluster", returnStdout: true).trim()
+                def s = sh(script: "cd ${TF_DIR} && terraform output -raw primary_ecs_service", returnStdout: true).trim()
+                sh "aws ecs update-service --cluster ${c} --service ${s} --force-new-deployment --region us-east-1"
+                sh "aws ecs wait services-stable --cluster ${c} --services ${s} --region us-east-1"
+            } }
+        }
+        stage('Tests') {
+            when { expression { params.ACTION == 'apply' } }
+            steps { script {
+                def url = sh(script: "cd ${TF_DIR} && terraform output -raw application_url", returnStdout: true).trim()
+                sh "curl -sf ${url}/health || exit 1"
+            } }
+        }
+        stage('Deploy ECS Secondary') {
+            when { expression { params.ACTION == 'apply' } }
+            steps { script {
+                def c = sh(script: "cd ${TF_DIR} && terraform output -raw secondary_ecs_cluster", returnStdout: true).trim()
+                sh "aws ecs update-service --cluster ${c} --service ${APP_NAME}-${params.ENVIRONMENT}-svc --force-new-deployment --region us-west-2"
+                sh "aws ecs wait services-stable --cluster ${c} --services ${APP_NAME}-${params.ENVIRONMENT}-svc --region us-west-2"
+            } }
+        }
+        stage('Verify DNS') {
+            when { expression { params.ACTION == 'apply' } }
+            steps { script {
+                def h = sh(script: "cd ${TF_DIR} && terraform output -raw primary_health_check_id", returnStdout: true).trim()
+                sh "aws route53 get-health-check-status --health-check-id ${h} --query 'HealthCheckObservations[0].StatusReport.Status' --output text"
+            } }
+        }
+    }
+    post {
+        always { dir(TF_DIR) { sh 'rm -f tfplan 2>/dev/null || true' }; cleanWs() }
+        success { echo "DEPLOYED to ${params.ENVIRONMENT}" }
+        failure { echo "FAILED" }
+    }
+}
