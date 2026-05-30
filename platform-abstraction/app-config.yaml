@@ -1,0 +1,72 @@
+# ======================================================================
+#  APPLICATION DEPLOYMENT CONFIGURATION
+#  Fill in this file and run: make deploy
+#  You do NOT need to touch any Terraform files.
+# ======================================================================
+#
+# Required fields are marked with [REQUIRED]
+# Optional fields have sensible defaults.
+
+# --- APPLICATION IDENTITY ---
+app:
+  name: "myapp"                           # [REQUIRED] lowercase, no spaces
+  environment: "production"               # [REQUIRED] dev | staging | production
+  team: "payments-platform"               # Team that owns this app
+  cost_center: "CC-12345"                 # For FinOps cost allocation
+
+# --- CONTAINER ---
+container:
+  image: "123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp"  # [REQUIRED]
+  tag: "latest"                           # Image tag to deploy
+  port: 8080                              # Port your app listens on
+  health_check: "/health"                 # Health check endpoint
+
+# --- SCALING ---
+# Profiles:  small  = 0.5 vCPU, 1 GB    medium = 1 vCPU, 2 GB
+#            large  = 2 vCPU, 4 GB       xlarge = 4 vCPU, 8 GB
+scaling:
+  profile: "medium"                       # small | medium | large | xlarge
+  primary:
+    min_tasks: 2                          # Min running tasks (active region)
+    max_tasks: 10                         # Max tasks under load
+    desired_tasks: 3                      # Starting task count
+  secondary:
+    min_tasks: 1                          # Min tasks (passive region)
+    max_tasks: 6                          # Max tasks if failover
+    desired_tasks: 1                      # Kept low to save cost
+
+# --- DATABASE ---
+# Profiles:  small = db.r6g.large   medium = db.r6g.xlarge   large = db.r6g.2xlarge
+database:
+  name: "appdb"                           # [REQUIRED] Database name
+  profile: "medium"                       # small | medium | large
+  primary_instances: 2                    # Writer + reader in primary
+  secondary_instances: 1                  # Readers in secondary
+  backup_retention_days: 14               # Days to retain backups
+
+# --- DNS & DOMAIN ---
+dns:
+  domain: "api.example.com"               # [REQUIRED]
+  hosted_zone_id: "Z0123456789ABCDEF"     # [REQUIRED] Route 53 zone ID
+
+# --- CERTIFICATES (ACM ARNs) ---
+certificates:
+  primary: "arn:aws:acm:us-east-1:123456789012:certificate/abc-123"    # [REQUIRED]
+  secondary: "arn:aws:acm:us-west-2:123456789012:certificate/def-456"  # [REQUIRED]
+
+# --- REGIONS ---
+regions:
+  primary: "us-east-1"                    # Active region
+  secondary: "us-west-2"                  # Passive / failover region
+
+# --- NETWORK (defaults work for most teams) ---
+network:
+  primary_vpc_cidr: "10.0.0.0/16"
+  secondary_vpc_cidr: "10.1.0.0/16"
+  # Subnets are auto-calculated. Override only if needed:
+  # primary_public_subnets: ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+
+# --- TAGS ---
+tags:
+  compliance: "sox"
+  data_classification: "confidential"
